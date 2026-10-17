@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>BlockBros Star Catch - Nile Badge</title>
+<!-- Lesson 3: a tiny game that unlocks an on-chain badge on the TRON Nile TESTNET.
+     No private keys are in this file. Signing happens only inside the player's TronLink wallet. -->
+<style>
+:root{--red:#d7263d;--gold:#ffc83c;--bg:#0e1117;--panel:#1c2030;--text:#f2f4f8;--muted:#a8afbf;--ok:#3ddc84}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body{display:flex;flex-direction:column;max-width:520px;margin:0 auto;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+header{background:var(--red);padding:10px 14px;display:flex;align-items:center;justify-content:space-between}
+header h1{font-size:19px;margin:0;letter-spacing:.5px}
+header .net{font-size:11px;background:#0008;padding:3px 8px;border-radius:10px}
+.notice{background:#3a2c00;color:var(--gold);font-size:13px;padding:7px 12px;text-align:center;border-bottom:1px solid #6b5300}
+.stats{display:flex;justify-content:space-around;padding:8px 6px;font-size:14px;background:var(--panel)}
+.stats b{color:var(--gold);font-size:18px}
+#stage{position:relative;flex:1;min-height:300px;margin:8px 10px;border-radius:14px;overflow:hidden;background:radial-gradient(circle at 50% 0,#22284a,#0a0c14);touch-action:none}
+canvas{display:block;width:100%;height:100%}
+.overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:20px;background:#0009}
+.overlay h2{margin:0 0 8px;font-size:26px;color:var(--gold)}
+.overlay p{margin:4px 0 14px;color:var(--text);font-size:15px}
+.hidden{display:none!important}
+button{font:inherit;font-weight:700;border:0;border-radius:12px;padding:13px 18px;font-size:17px;cursor:pointer;color:#fff;background:var(--red);min-width:200px}
+button.alt{background:#2f3650}
+button.gold{background:var(--gold);color:#201600}
+button:disabled{opacity:.45}
+.wallet{background:var(--panel);margin:0 10px 10px;border-radius:14px;padding:12px;font-size:14px}
+.wallet .row{display:flex;flex-direction:column;gap:8px;align-items:stretch}
+.addr{font-family:ui-monospace,Menlo,monospace;font-size:12px;word-break:break-all;color:var(--muted)}
+#msg{min-height:20px;margin-top:8px;font-size:14px;line-height:1.35}
+#msg.err{color:#ff7a85}#msg.ok{color:var(--ok)}
+#msg a{color:var(--gold);word-break:break-all}
+small{color:var(--muted)}
+</style>
+</head>
+<body>
+<header><h1>⭐ BlockBros Star Catch</h1><span class="net">NILE TESTNET</span></header>
+<div class="notice">Nile testnet only · uses free test TRX · no real money</div>
+<div class="stats">
+  <div>Stars <b id="score">0</b>/10</div>
+  <div>Time <b id="time">20</b>s</div>
+  <div>Badges claimed <b id="total">…</b></div>
+</div>
+<div id="stage">
+  <canvas id="cv"></canvas>
+  <div class="overlay" id="startOv">
+    <h2>Catch 10 stars in 20 seconds!</h2>
+    <p>Tap the falling stars. Win to unlock your<br>BlockBros Badge on the TRON Nile testnet.</p>
+    <button id="startBtn">▶ Play</button>
+  </div>
+  <div class="overlay hidden" id="endOv">
+    <h2 id="endTitle"></h2>
+    <p id="endText"></p>
+    <button id="againBtn" class="alt">↻ Play again</button>
+  </div>
+</div>
+<div class="wallet">
+  <div class="row">
+    <button id="connectBtn" class="alt">🔗 Connect TronLink</button>
+    <div id="acct" class="hidden">Wallet: <span class="addr" id="addr"></span><br>Has badge: <b id="has">…</b></div>
+    <button id="claimBtn" class="gold" disabled>🏅 Claim BlockBros Badge</button>
+    <small id="claimHint">Win the game to unlock the claim button.</small>
+  </div>
+  <div id="msg"></div>
+</div>
+<script>
+(() => {
+'use strict';
+// ---------- Settings ----------
+const CONTRACT = 'TGiPmBadx7UzEEBk3Y3R8MJGUfbkLFTK3t';   // GameBadge on Nile
+const API = 'https://nile.trongrid.io';                   // public Nile node (read-only use)
+const TRONSCAN = 'https://nile.tronscan.org/#/transaction/';
+const NILE_GENESIS = '0000000000000000d698d4192c56cb6be724a558448e2684802de4d6cd8690dc';
+const MAIN_GENESIS = '00000000000000001ebf88508a03865c71d452e25f4d51194196a1d22b6653dc';
+// feeLimit is in SUN: 1 TRX = 1,000,000 sun. 50 TRX = 50,000,000 sun (a claim costs ~4.2 TRX).
+const FEE_LIMIT = 50_000_000;
+const GOAL = 10, SECONDS = 20;
+const ZERO_ADDR = 'T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb';
+
+const $ = (id) => document.getElementById(id);
+const msg = (text, cls = '') => { const m = $('msg'); m.className = cls; m.innerHTML = text; };
+const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+// ---------- Base58 -> hex (for hasBadge(address) reads, no library needed) ----------
+const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function base58ToHex(s) {
+  let n = 0n;
+  for (const ch of s) { const i = B58.indexOf(ch); if (i < 0) throw new Error('bad address'); n = n * 58n + BigInt(i); }
+  let hex = n.toString(16); if (hex.length % 2) hex = '0' + hex;
+  for (const ch of s) { if (ch === '1') hex = '00' + hex; else break; }
+  return hex.slice(0, -8);              // drop 4-byte checksum -> "41" + 20-byte address
+}
+
+// ---------- Read-only calls through the public Nile API (free, no wallet) ----------
+async function constantCall(selector, paramHex = '') {
+  const r = await fetch(API + '/wallet/triggerconstantcontract', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ owner_address: ZERO_ADDR, contract_address: CONTRACT,
+      function_selector: selector, parameter: paramHex, visible: true })
+  });
+  const j = await r.json();
+  if (!j.constant_result || !j.result || !j.result.result) throw new Error('read failed');
+  return j.constant_result[0];
+}
+async function readTotal() { return BigInt('0x' + (await constantCall('totalClaimed()'))); }
+async function readHasBadge(addrB58) {
+  const p = base58ToHex(addrB58).slice(2).padStart(64, '0');
+  return BigInt('0x' + (await constantCall('hasBadge(address)', p))) === 1n;
+}
+async function refreshTotal() {
+  try { const t = await readTotal(); $('total').textContent = t.toString(); window.__total = Number(t); }
+  catch (e) { $('total').textContent = '?'; }
+}
+
+// ---------- The game ----------
+const cv = $('cv'), ctx = cv.getContext('2d');
+const game = { running: false, won: false, score: 0, timeLeft: SECONDS, stars: [], last: 0, spawnT: 0 };
+window.__game = game;                                     // for testing
+function resize() { const r = $('stage').getBoundingClientRect(); const d = window.devicePixelRatio || 1;
+  cv.width = r.width * d; cv.height = r.height * d; ctx.setTransform(d, 0, 0, d, 0, 0); game.w = r.width; game.h = r.height; }
+window.addEventListener('resize', resize);
+function spawn() { const r = 26; game.stars.push({ x: r + Math.random() * (game.w - 2 * r), y: -r, r,
+  vy: 70 + Math.random() * 60, rot: Math.random() * 6, hit: 0 }); }
+function drawStar(s) {
+  ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.rot); ctx.beginPath();
+  for (let i = 0; i < 10; i++) { const a = i * Math.PI / 5 - Math.PI / 2, rr = i % 2 ? s.r * 0.45 : s.r;
+    ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); }
+  ctx.closePath(); ctx.fillStyle = s.hit ? '#3ddc84' : '#ffc83c'; ctx.shadowColor = '#ffc83c'; ctx.shadowBlur = 14;
+  ctx.globalAlpha = s.hit ? Math.max(0, 1 - s.hit * 3) : 1; ctx.fill(); ctx.restore();
+}
+function frame(t) {
+  const dt = Math.min(0.05, (t - (game.last || t)) / 1000); game.last = t;
+  ctx.clearRect(0, 0, game.w, game.h);
+  if (game.running) {
+    game.timeLeft -= dt; game.spawnT -= dt;
+    if (game.spawnT <= 0) { spawn(); game.spawnT = 0.55; }
+    if (game.timeLeft <= 0) { game.timeLeft = 0; end(false); }
+  }
+  for (const s of game.stars) { if (s.hit) s.hit += dt; else s.y += s.vy * dt; s.rot += dt; drawStar(s); }
+  game.stars = game.stars.filter(s => s.y < game.h + s.r && (!s.hit || s.hit < 0.35));
+  $('time').textContent = Math.ceil(game.timeLeft); $('score').textContent = game.score;
+  requestAnimationFrame(frame);
+}
+function tap(x, y) {                                   // returns true if a star was caught
+  if (!game.running) return false;
+  for (const s of game.stars) {
+    if (!s.hit && Math.hypot(s.x - x, s.y - y) <= s.r + 18) {   // generous touch radius
+      s.hit = 0.0001; game.score++; if (game.score >= GOAL) end(true); return true; }
+  }
+  return false;
+}
+game.tap = tap;
+cv.addEventListener('pointerdown', (e) => { const r = cv.getBoundingClientRect(); tap(e.clientX - r.left, e.clientY - r.top); });
+function start() { Object.assign(game, { running: true, score: 0, timeLeft: SECONDS, stars: [], spawnT: 0 });
+  $('startOv').classList.add('hidden'); $('endOv').classList.add('hidden'); }
+function end(win) {
+  game.running = false; if (win) game.won = true;
+  $('endTitle').textContent = win ? '🏆 You win!' : "⏰ Time's up!";
+  $('endText').innerHTML = win ? 'Badge unlocked! Connect TronLink below<br>and tap “Claim BlockBros Badge”.' : `You caught ${game.score}/10. Try again!`;
+  $('endOv').classList.remove('hidden'); updateClaim();
+}
+$('startBtn').onclick = start; $('againBtn').onclick = start;
+
+// ---------- Wallet (TronLink) ----------
+let tw = null, account = null, onNile = false, hasBadge = false, busy = false;
+function updateClaim() {
+  const ok = game.won && account && onNile && !hasBadge && !busy;
+  $('claimBtn').disabled = !ok;
+  $('claimHint').textContent = !game.won ? 'Win the game to unlock the claim button.'
+    : !account ? 'Connect TronLink to claim.' : !onNile ? 'Switch TronLink to the Nile testnet.'
+    : hasBadge ? 'This wallet already has its badge. ✅' : busy ? 'Working…' : 'Ready! TronLink will ask you to approve.';
+}
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+async function waitForTronLink(ms = 3000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) { if (window.tronLink || window.tron || window.tronWeb) return true; await sleep(150); }
+  return !!(window.tronLink || window.tron || window.tronWeb);
+}
+function getTronWeb() { return (window.tron && window.tron.tronWeb) || (window.tronLink && window.tronLink.tronWeb) || window.tronWeb || null; }
+async function checkNetwork(t) {
+  try { const b = await t.trx.getBlockByNumber(0); const id = b && (b.blockID || b.blockId);
+    if (id === NILE_GENESIS) return 'nile'; if (id === MAIN_GENESIS) return 'mainnet';
+  } catch (e) { /* fall back to host name */ }
+  const host = (t.fullNode && t.fullNode.host) || '';
+  if (/nile/i.test(host)) return 'nile';
+  if (/api\.trongrid\.io|tronstack|mainnet/i.test(host)) return 'mainnet';
+  return 'unknown';
+}
+async function connect() {
+  msg('Looking for TronLink…');
+  if (!(await waitForTronLink())) {
+    msg('TronLink not found. Open this page in the <b>TronLink app → DApp browser</b> (or with the TronLink extension), switched to the Nile testnet.', 'err'); return; }
+  try {
+    if (window.tron && window.tron.request) {
+      await window.tron.request({ method: 'eth_requestAccounts' });
+    } else if (window.tronLink && window.tronLink.request) {
+      const r = await window.tronLink.request({ method: 'tron_requestAccounts' });
+      if (r && r.code === 4001) throw { code: 4001, message: 'rejected' };
+    }
+  } catch (e) {
+    if (isReject(e)) { msg('Connection request was rejected in TronLink.', 'err'); return; }
+    msg('Could not connect: ' + esc(errText(e)), 'err'); return;
+  }
+  tw = getTronWeb();
+  account = tw && tw.defaultAddress && tw.defaultAddress.base58;
+  if (!account) { msg('TronLink is locked or has no account. Unlock it and try again.', 'err'); return; }
+  $('connectBtn').textContent = '🔄 Refresh wallet';
+  $('acct').classList.remove('hidden'); $('addr').textContent = account;
+  const net = await checkNetwork(tw); onNile = net === 'nile';
+  if (net === 'mainnet') { msg('⚠️ TronLink is on <b>MAINNET</b>. This lesson is Nile testnet only. In TronLink, switch the node to <b>Nile Testnet</b>, then tap Refresh.', 'err'); }
+  else if (!onNile) { msg('⚠️ Could not confirm TronLink is on Nile. Switch the node to <b>Nile Testnet</b> and tap Refresh.', 'err'); }
+  else msg('Connected on Nile testnet ✅', 'ok');
+  try { hasBadge = await readHasBadge(account); $('has').textContent = hasBadge ? 'yes ✅' : 'not yet'; }
+  catch (e) { $('has').textContent = '?'; }
+  updateClaim();
+}
+function errText(e) { return typeof e === 'string' ? e : (e && (e.message || e.error)) || JSON.stringify(e); }
+function isReject(e) { return (e && e.code === 4001) || /declin|reject|cancel|denied/i.test(errText(e)); }
+function hexToText(h) { try { return decodeURIComponent(h.replace(/(..)/g, '%$1')); } catch { return ''; } }
+async function claim() {
+  if (busy) return; busy = true; updateClaim();
+  try {
+    const net = await checkNetwork(tw); if (net !== 'nile') { onNile = false; throw new Error('Not on Nile testnet — blocked.'); }
+    if (await readHasBadge(account)) { hasBadge = true; $('has').textContent = 'yes ✅';
+      msg('You already have a badge — each wallet can claim only once. ✅', 'ok'); return; }
+    msg('Building the claim transaction… then approve it in TronLink.');
+    const { transaction, result } = await tw.transactionBuilder.triggerSmartContract(
+      CONTRACT, 'claim()', { feeLimit: FEE_LIMIT, callValue: 0 }, [], account);
+    if (!result || !result.result || !transaction) throw new Error('Could not build transaction');
+    const signed = await tw.trx.sign(transaction);           // TronLink shows the approval screen
+    const sent = await tw.trx.sendRawTransaction(signed);
+    if (!sent || !sent.result) throw new Error((sent && (hexToText(sent.message || '') || sent.code)) || 'broadcast failed');
+    const txid = sent.txid || transaction.txID;
+    const link = `<a href="${TRONSCAN + txid}" target="_blank" rel="noopener">${txid.slice(0, 18)}…</a>`;
+    msg('Sent! Waiting for confirmation… ' + link);
+    let info = null;
+    for (let i = 0; i < 30 && !(info && info.id); i++) { await sleep(3000);
+      info = await (await fetch(API + '/wallet/gettransactioninfobyid', { method: 'POST',
+        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value: txid }) })).json(); }
+    const res = info && info.receipt && info.receipt.result;
+    if (res === 'SUCCESS' || (info && info.id && !res)) {
+      msg(`🏅 Badge claimed! Cost: ${((info.fee || 0) / 1e6).toFixed(4)} test TRX.<br>View on Tronscan: ${link}`, 'ok');
+    } else if (info && info.id) {
+      const why = info.contractResult && info.contractResult[0] ? hexToText(info.contractResult[0].slice(136)).replace(/\0/g, '') : '';
+      msg(`Claim failed (${esc(res)}${why ? ': ' + esc(why) : ''}). ${link}`, 'err');
+    } else msg('Not confirmed yet — check Tronscan: ' + link);
+    hasBadge = await readHasBadge(account).catch(() => hasBadge); $('has').textContent = hasBadge ? 'yes ✅' : 'not yet';
+    await refreshTotal();
+  } catch (e) {
+    if (isReject(e)) msg('You rejected the transaction in TronLink. Nothing was sent.', 'err');
+    else if (/already have a badge/i.test(errText(e))) { hasBadge = true; msg('You already have a badge. ✅', 'ok'); }
+    else if (/balance|energy|bandwidth/i.test(errText(e))) msg('Not enough test TRX for fees. Get free Nile TRX at nileex.io.', 'err');
+    else msg('Claim error: ' + esc(errText(e)), 'err');
+  } finally { busy = false; updateClaim(); }
+}
+$('connectBtn').onclick = connect; $('claimBtn').onclick = claim;
+window.addEventListener('message', (e) => {                 // TronLink account / node changes
+  const a = e.data && e.data.message && e.data.message.action;
+  if (account && (a === 'setAccount' || a === 'setNode' || a === 'accountsChanged')) connect();
+});
+
+resize(); requestAnimationFrame(frame); refreshTotal(); setInterval(refreshTotal, 30000);
+})();
+</script>
+</body>
+</html>
